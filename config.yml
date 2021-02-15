@@ -1,0 +1,25 @@
+ckpt_path: '/content/drive/My Drive/transformer'
+data:
+  num_input_tokens: !!null
+  num_output_tokens: !!null
+  batch_size: 64
+  shuffle_buffer_size: 20000
+  max_seq_length: 40
+  target_vocab_size: 8192
+  pad_symbol: 0
+  tokenizer_path: '/content/drive/My Drive/transformer'
+
+model:
+  model_dim: 128 #512
+  ff_dim: 512 #2048
+  num_heads: 8
+  num_encoder_blocks: 4 #6
+  num_decoder_blocks: 4 #6
+  dropout: 0.1
+
+epochs: 20
+
+
+
+
+
