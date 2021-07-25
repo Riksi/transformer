@@ -27,7 +27,7 @@ class PositionalEncoding(tf.keras.models.Model):
     def call(self, x, training=True):
         # x: (B, N, D)
         # (N,)
-        length = x.shape[-2]
+        length = tf.shape(x)[-2]
         pos = tf.cast(tf.range(length), tf.float32)
         # (1, N) / (D / 2, 1) -> (D / 2, N)
         inp = pos[None] * self.dim[:, None]
@@ -46,7 +46,7 @@ class PositionalEncoding(tf.keras.models.Model):
         return x + enc
 
 
-class RelativePositionalEncoding(tf.keras.layers.Layer)
-    def __init__(self, dim, dropout=0.0):
+# class RelativePositionalEncoding(tf.keras.layers.Layer)
+#     def __init__(self, dim, dropout=0.0):
 
 

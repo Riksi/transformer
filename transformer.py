@@ -3,6 +3,8 @@ import tensorflow as tf
 from embedding import PositionalEncoding, ScaledEmbedding
 from blocks import Encoder, Decoder
 
+print('hi')
+
 
 class Transformer(tf.keras.models.Model):
     def __init__(self,
@@ -17,6 +19,7 @@ class Transformer(tf.keras.models.Model):
                  share_embed_weights=False,
                  share_output_weights=False):
         super(Transformer, self).__init__()
+        self.model_dim = model_dim
         self.share_embed_weights = share_embed_weights
         self.share_output_weights = share_output_weights
         self.input_embedding = ScaledEmbedding(num_tokens, model_dim)
@@ -40,28 +43,47 @@ class Transformer(tf.keras.models.Model):
         if not self.share_output_weights:
             self.output_layer = tf.keras.layers.Dense(units=num_tgt_tokens)
 
-    def call(self, x, y, src_mask, tgt_mask, training=True):
+    def encode(self, x, src_mask, training=True):
         x = self.input_embedding(x)
         x = self.enc_pos_encoding(x, training=training)
-        memory = self.encoder(x, mask=src_mask, training=training)
+        memory, attn = self.encoder(x, mask=src_mask, training=training)
+        return memory, attn
+
+    def decode(self, y, memory, src_mask, tgt_mask, training=True):
         if self.share_embed_weights:
             y = self.input_embedding(y)
         else:
             y = self.target_embedding(y)
         y = self.dec_pos_encoding(y, training=training)
-        out = self.decoder(y, memory,
-                            memory_mask=src_mask,
-                            decoder_mask=tgt_mask,
-                            training=training)
-
-        if self.share_output_weights:
+        out, self_attn, attn = self.decoder(y, memory,
+                           memory_mask=src_mask,
+                           decoder_mask=tgt_mask,
+                           training=training)
+        if not self.share_output_weights:
             logits = self.output_layer(out)
         else:
             # This works because this is called only after
             # target_embedding is called so the weights will
             # have been created
-            logits = tf.matmul(out, self.target_embedding.weights[0], transpose_b=True)
-        return logits, memory
+            if not self.share_embed_weights:
+                embed = self.target_embedding
+            else:
+                embed = self.input_embedding
+            logits = tf.matmul(out, embed.weights[0], transpose_b=True)
+        return logits, self_attn, attn
+
+    def call(self, x, y, src_mask, tgt_mask, training=True):
+        memory, enc_attn = self.encode(x, src_mask, training=training)
+        logits, dec_self_attn, dec_attn = self.decode(y, memory,
+                        src_mask=src_mask,
+                        tgt_mask=tgt_mask,
+                        training=training)
+        attention = dict(
+            enc=enc_attn,
+            dec_self=dec_self_attn,
+            dec_memory=dec_attn
+        )
+        return logits, attention
 
 
 class MultiTaskTransformer(tf.keras.models.Model):

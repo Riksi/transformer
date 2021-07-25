@@ -11,7 +11,9 @@ def scaled_dot_product_attention(query, key, value, mask, inf=1e9):
     alpha_term = tf.where(mask, alpha_term, -inf)
     alpha = tf.nn.softmax(alpha_term)
     # (B, H, N_q, N_kv) @ (B, H, N_kv, d') -> (B, H, N_q, d')
-    return tf.matmul(alpha, value)
+    out = tf.matmul(alpha, value)
+
+    return out, alpha
 
 
 class MultiHeadAttention(tf.keras.models.Model):
@@ -48,10 +50,12 @@ class MultiHeadAttention(tf.keras.models.Model):
         # (query=(B, h, N_q, d//h), key=(B, h, N_k, d//h), value=(B, h, N_v, d//h))
         query, key, value = (self.split_heads(i) for i in [query, key, value])
         # (B, h, N_q, d)
-        x = scaled_dot_product_attention(query, key, value, mask)
+        x, attn = scaled_dot_product_attention(query, key, value, mask)
+
         x = self.merge_heads(x)
         x = self.transform_out(x)
-        return x
+
+        return x, attn
 
 
 class NaiveRelativeMultiHeadAttention(tf.keras.models.Model):
@@ -60,9 +64,8 @@ class NaiveRelativeMultiHeadAttention(tf.keras.models.Model):
         self.dim = dim
         self.num_heads = num_heads
         # TODO: should use bias be false for these???
-        self.transform_query, self.transform_key, self.transform_value, self.transform_key_rel = [
-            *(tf.keras.layers.Dense(units=dim) for _ in range(3))
-        ]
+        self.transform_query, self.transform_key, self.transform_value, self.transform_key_rel = (
+            tf.keras.layers.Dense(units=dim) for _ in range(4))
 
         self.weight_key = tf.keras.layers.Dense(units=1, use_bias=False)
         self.weight_rel = tf.keras.layers.Dense(units=1, use_bias=False)
@@ -87,7 +90,7 @@ class NaiveRelativeMultiHeadAttention(tf.keras.models.Model):
 
     def call(self, query, key, value, mask, rel):
         # (query=(B, N_q, d), key=(B, N_k, d), value=(B, N_v, d))
-        # rel: (N_q, N_k, d)
+        # rel: (N_q + N_k, d)
         query = self.transform_query(query)
         key = self.transform_key(key)
         value = self.transform_value(value)
@@ -95,37 +98,67 @@ class NaiveRelativeMultiHeadAttention(tf.keras.models.Model):
         query, key, value = (self.split_heads(i) for i in [query, key, value])
         # (B, h, N_q, d)
 
-        # (N_q, N_k, d)
-        rel = self.relative_pe_transform(rel)
-
-        # (N_q, N_k, h, d//h)
-        rel = tf.reshape(rel, tf.concat([tf.shape(rel)[:2], [self.num_heads, self.dim // self.num_heads]], axis=0))
-        # (h, N_q, N_k, d//h)
-        rel = tf.transpose(rel, (2, 0, 1, 3))
-
-        # (B, h, N_q, d//h), (B, h, N_kv, d//h)
-        # -> (B, h, N_q, d//h), (B, h, d, N_kv)
-        # -> (B, h, N_q, N_kv)
-        query_key_term = tf.matmul(query, key, transpose_b=True)
+        # (N_q + N_k, d)
+        # TODO: show this be the same as `transform_key_rel`
+        rel = self.transform_key_rel(rel[::-1])
 
         # The matrices will be aligned so that each query is multiplied
         # with its corresponding set of relative encodings
-        # (B, h, N_q, 1, d//h), (h, N_q, N_kv, d//h)
-        # -> (B, h, N_q, 1,    d//h),
-        #       (h, N_q, d//h, N_kv)
-        # -> (B, h, N_q, 1,    N_kv) -> (B, h, N_q, N_kv)
-        query_rel_term = tf.squeeze(
-            tf.matmul(query[..., None, :], rel, transpose_b=True),
-            axis=-2
+        # (B, h, N_q, d//h), (h, N_q + N_kv, d//h)
+        # -> (B, h, N_q, d//h),
+        #       (h, d//h, N_q + N_kv)
+        # -> (B, h, N_q, N_q + N_kv) -> (B, h, N_q, N_q + N_kv)
+        query_rel_term = tf.matmul(query, rel, transpose_b=True)
+
+        N_kv = tf.shape(key)[1]
+        N_r = tf.shape(rel)[1]
+
+        # We want the left N_kv + 1, N_kv + 2, etc. values of query_rel_mask but we want to
+        # place them in the right N_kv + 1, N_kv + 2, etc. values of a new tensor
+
+        # Initially mask the right N_kv + 1, N_kv + 2, etc. values
+        # (N_q, N_q + N_kv)
+        # N_r - N_kv = (N_q + N_kv) - N_kv = N_q
+        non_zero_mask = tf.sequence_mask(
+            tf.range(N_kv + 1, N_r + 1), N_r
         )
 
-        # (B, h, N_kv, d//h) -> (B, h, N_kv)
+        # (B, h, N_q, N_q + N_kv)
+        non_zero_mask = tf.broadcast_to(non_zero_mask[None, None], tf.shape(query_rel_term))
+
+        # The True positions give the indices for the result
+        non_zero_idx = tf.where(non_zero_mask)
+
+        # Reverse the mask  since we want to keepp the leftmost values
+        # Note that the the indices are row by row and the order of values
+        # selected is the same as the order of the indices
+        non_zero_terms = query_rel_term[non_zero_mask[..., ::-1]]
+
+        query_rel_term = tf.scatter_nd(
+            indices=non_zero_idx,
+            updates=non_zero_terms,
+            shape=tf.shape(query_rel_term)
+        )
+        query_key_term = tf.matmul(query, key, transpose_b=True)
+
+        # (B, h, N_kv, d//h) -> (B, h, N_kv, 1)
         # -> (B, h, 1, N_kv, 1) -> (B, h, 1, N_kv)
         key_term = tf.squeeze(self.weight_key(key)[:, :, None], dim=-1)
 
-        # (h, N_q, N_kv, d//h) -> (h, N_q, N_kv)
-        # -> (h, N_q, N_kv, 1) -> (h, N_q, N_kv)
+        # (h, N_q, N_kv, d//h) -> (h, N_q, N_kv, 1)
+        # -> (h, N_q + N_kv, 1) -> (h, N_q + N_kv)
         rel_term = tf.squeeze(self.weight_rel(rel), dim=-1)
+
+        # (h, N_q, N_q + N_kv)
+        rel_term = tf.tile(rel_term[:, None], [1, tf.shape(query)[1], 1])
+
+        # non_zero_mask is repeated for each batch element and head so we can
+        # just reuse it by selecting the first element of it
+        rel_term = tf.scatter_nd(
+            indices=tf.where(non_zero_mask[0]),
+            updates=rel_term[non_zero_mask[0][..., ::-1]],
+            shape=tf.shape(rel_term)
+        )
 
         # (B, h, N_q, N_kv) + (B, h, N_q, N_kv) + (B, h, 1, N_kv) + (h, N_q, N_kv)
         # = (B, h, N_q, N_kv)
@@ -150,3 +183,22 @@ class NaiveRelativeMultiHeadAttention(tf.keras.models.Model):
         # (B, N_q, d)
         x = self.transform_out(x)
         return x
+
+
+
+        # # (N_q, N_k, h, d//h)
+        # rel = tf.reshape(rel, tf.concat([tf.shape(rel)[:2],
+        #                                  [self.num_heads, self.dim // self.num_heads]], axis=0))
+        # # (h, N_q, N_k, d//h)
+        # rel = tf.transpose(rel, (2, 0, 1, 3))
+
+        # # The matrices will be aligned so that each query is multiplied
+        # # with its corresponding set of relative encodings
+        # # (B, h, N_q, 1, d//h), (h, N_q, N_kv, d//h)
+        # # -> (B, h, N_q, 1,    d//h),
+        # #       (h, N_q, d//h, N_kv)
+        # # -> (B, h, N_q, 1,    N_kv) -> (B, h, N_q, N_kv)
+        # query_rel_term = tf.squeeze(
+        #     tf.matmul(query[..., None, :], rel, transpose_b=True),
+        #     axis=-2
+        # )
