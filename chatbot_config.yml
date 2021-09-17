@@ -1,0 +1,20 @@
+#ckpt_path: '/content/drive/My Drive/transformer'
+data:
+  num_input_tokens: 6860
+  num_output_tokens: 6860
+  batch_size: 64
+  shuffle_buffer_size: 20000
+  pad_symbol: 0
+  start_symbol: 1
+  eos_symbol: 2
+  unk_symbol: 3
+
+model:
+  model_dim: 512 #128 #512
+  ff_dim: 2048 #512 #2048
+  num_heads: 8
+  num_encoder_blocks: 6 #4 #6
+  num_decoder_blocks: 6 #4 #6
+  dropout: 0.1
+
+epochs: 20

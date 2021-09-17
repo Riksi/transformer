@@ -18,6 +18,7 @@ model:
   dropout: 0.1
 
 epochs: 20
+smoothing_prob: 0.1
 
 
 

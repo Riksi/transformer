@@ -34,7 +34,7 @@ class Corpus(object):
                     self.vocab.encode_file(os.path.join(path, f"{fold}.txt"), ordered=True))
 
         # TODO: maybe these should be different?
-        self.cutoffs = [0, 20000, 40000, 200000] + [len(self.vocab)]
+        self.cutoffs = [] #0, 20000, 40000, 200000] + [len(self.vocab)]
 
     def convert_to_tfrecords(self, split, save_dir, bsz, tgt_len,
                              num_core_per_host, **kwargs):
@@ -94,7 +94,7 @@ def get_bin_sizes(data, batch_size, tgt_len, cutoffs, std_mult=[2.5, 2.5, 2.5]):
 
         # here it would be
         # [20000, 40000), [40000, 200000), [200000, end)
-        # TODO: why is [0, 20000) droppd
+        # TODO: why is [0, 20000) dropped
         for b, (left, right) in enumerate(zip(cutoffs[1:-1], cutoffs[2:])):
             mask = (data >= left) * (data < right)
             percents = mask.astype(np.float64).sum(2).sum(0) / tot
